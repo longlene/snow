@@ -1,0 +1,19 @@
+{application, snow,
+ [{description, "High-performance lock-free Snowflake ID generator"},
+  {vsn, "1.0.0"},
+  {registered, []},
+  {mod, {snow_app, []}},
+  {applications,
+   [kernel,
+    stdlib
+   ]},
+  {env,[
+   {epoch, 1640995200000}, % 2022-01-01 00:00:00 UTC
+   {region, 0},            % 0-15
+   {worker, 0}             % 0-63
+  ]},
+  {modules, []},
+
+  {licenses, ["Apache 2.0"]},
+  {links, []}
+ ]}.
