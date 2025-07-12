@@ -11,7 +11,7 @@ A high-performance, lock-free Snowflake ID generation library for Erlang, built 
 - 🌍 **Distributed-Friendly**: Supports region and worker ID configuration for multi-node deployments
 - ⏰ **Clock Protection**: Automatic detection and handling of clock drift/backwards
 - 🔧 **Configurable**: Custom epoch, region, worker ID, and compile-time bit allocation
-- 🎯 **Adaptive Backoff**: Smart CAS retry strategy reduces contention by 98%+
+- 🎯 **Aggressive CAS**: Direct retry with CAS return value optimization for maximum throughput
 - 📦 **Zero Dependencies**: Pure Erlang implementation
 
 ## ID Structure (64-bit)
@@ -68,11 +68,8 @@ Ids = snow:next_ids(1000).
 %% Decode ID
 #{timestamp := Ts, region := R, worker := W, sequence := Seq} = snow:decode_id(Id).
 
-%% Custom initialization (default aggressive mode)
+%% Custom initialization
 snow:init(1640995200000, 5, 10).
-
-%% Custom initialization with conservative mode
-snow:init(1640995200000, 5, 10, conservative).
 
 %% Get configuration info
 snow:info().
@@ -81,21 +78,12 @@ snow:info().
 ## API Reference
 
 ### snow:init/3
-Initialize the generator with custom configuration (default aggressive mode).
+Initialize the generator with custom configuration.
 
 **Parameters:**
 - `Epoch :: non_neg_integer()` - Start timestamp in milliseconds
 - `Region :: 0..15` - Region ID
 - `Worker :: 0..63` - Worker node ID
-
-### snow:init/4
-Initialize the generator with custom configuration and generation mode.
-
-**Parameters:**
-- `Epoch :: non_neg_integer()` - Start timestamp in milliseconds
-- `Region :: 0..15` - Region ID
-- `Worker :: 0..63` - Worker node ID
-- `Mode :: conservative | aggressive` - Generation mode
 
 ### snow:next_id/0
 Generate a single Snowflake ID.
@@ -135,7 +123,6 @@ Get current generator configuration and bit allocation.
     epoch := non_neg_integer(),
     region := non_neg_integer(),
     worker := non_neg_integer(),
-    mode := conservative | aggressive,
     bits := #{
         timestamp := pos_integer(),
         region := pos_integer(),
@@ -149,45 +136,20 @@ Get current generator configuration and bit allocation.
 
 Benchmarks on modern hardware (Erlang/OTP 26):
 
-### Aggressive Mode (Default)
 | Scenario | Performance | Notes |
 |----------|------------|--------|
-| Single-thread | 2.05M IDs/sec | Maximum single-threaded performance |
-| 10 processes | 1.80M IDs/sec | Higher contention in moderate load |
-| 20 processes | 2.49M IDs/sec | Strong concurrent performance |
-| 50 processes | 3.08M IDs/sec | Excellent under extreme load |
-
-### Conservative Mode  
-| Scenario | Performance | Notes |
-|----------|------------|--------|
-| Single-thread | 1.91M IDs/sec | Stable baseline with backoff |
-| 10 processes | 2.17M IDs/sec | Adaptive backoff reduces contention |
-| 20 processes | 2.18M IDs/sec | Consistent scalability |
-| 50 processes | 1.82M IDs/sec | CPU-friendly under extreme load |
+| Single-thread | 2.07M IDs/sec | Maximum single-threaded performance |
+| 10 processes | 2.26M IDs/sec | Good concurrent performance |
+| 20 processes | 3.24M IDs/sec | Excellent concurrent scalability |
+| 50 processes | 2.75M IDs/sec | Strong performance under high load |
 
 ### Performance Optimizations
 
 1. **Pre-computed Base IDs**: Region and worker bits calculated once at initialization
 2. **Compile-time Constants**: Bit shifts resolved at compile time
-3. **Dual Generation Modes**: 
-   - **Aggressive** (default): Direct CAS retry for maximum throughput
-   - **Conservative**: Adaptive backoff for CPU efficiency and stability
-4. **CAS Return Value Optimization**: Uses actual values from failed CAS operations
-5. **Batch Sequence Reservation**: Single CAS operation reserves multiple sequence numbers
-
-### Mode Selection Guide
-
-- **Use Aggressive** (default) for:
-  - High-throughput scenarios (50+ concurrent processes)
-  - Performance-critical applications
-  - Maximum speed requirements
-  - Most general use cases
-
-- **Use Conservative** for:
-  - CPU resource optimization is priority
-  - Long-running applications with strict resource limits
-  - Environments where CPU efficiency matters more than peak performance
-  - Moderate concurrency levels (10-20 processes)
+3. **CAS Return Value Optimization**: Uses actual values from failed CAS operations for immediate retry
+4. **Batch Sequence Reservation**: Single CAS operation reserves multiple sequence numbers
+5. **Lock-Free Design**: Pure atomic operations without any locking mechanisms
 
 ## Compile-time Configuration
 
@@ -214,16 +176,19 @@ Customize bit allocation by modifying `rebar.config`:
 - No GenServer or process-based state management
 - Configuration stored in `persistent_term` for fast access
 
-### Adaptive Backoff Strategy
-Reduces CAS contention through progressive backoff:
+### CAS Optimization Strategy
+Maximizes throughput through immediate CAS retry:
 
 ```erlang
-retry_strategy(Retries) when Retries < 3 ->
-    erlang:yield();              % Light contention: yield CPU
-retry_strategy(Retries) when Retries < 6 ->  
-    timer:sleep(1);              % Medium contention: brief sleep
-retry_strategy(Retries) ->
-    timer:sleep(min(10, Retries-5)). % Heavy contention: progressive delay
+%% Uses return value from failed CAS operations
+case atomics:compare_exchange(AtomicRef, 1, OldVal, NewVal) of
+    ok ->
+        %% Success - return generated ID
+        construct_final_id(Timestamp, BaseId, Sequence);
+    CurrentVal ->
+        %% Failed - retry immediately with current value
+        generate_id_loop(Epoch, BaseId, AtomicRef, CurrentVal)
+end
 ```
 
 ### Distributed Deployment
