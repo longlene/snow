@@ -1,6 +1,6 @@
 {application, snow,
  [{description, "High-performance lock-free Snowflake ID generator"},
-  {vsn, "1.0.0"},
+  {vsn, "0.0.1"},
   {registered, []},
   {mod, {snow_app, []}},
   {applications,

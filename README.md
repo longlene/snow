@@ -14,7 +14,7 @@ A high-performance, lock-free Snowflake ID generation library for Erlang, built 
 - 🎯 **Aggressive CAS**: Direct retry with CAS return value optimization for maximum throughput
 - 📦 **Zero Dependencies**: Pure Erlang implementation
 
-## ID Structure (64-bit)
+## ID Structure (64-bit, can be changed via rebar.config)
 
 ```
 | 1 bit | 41 bits | 4 bits | 6 bits | 12 bits |
@@ -34,7 +34,7 @@ A high-performance, lock-free Snowflake ID generation library for Erlang, built 
 
 ```erlang
 {deps, [
-    {snow, {git, "https://github.com/yourusername/snow.git", {branch, "main"}}}
+    {snow, {git, "https://github.com/longlene/snow.git", {branch, "main"}}}
 ]}.
 ```
 
