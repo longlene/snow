@@ -18,7 +18,11 @@
          test_sequential/1,
          test_concurrent_generation/1,
          test_concurrent_generation_batch/1,
-         test_concurrent_generation_huge/1
+         test_concurrent_generation_huge/1,
+         test_multi_worker_basic/1,
+         test_multi_worker_uniqueness/1,
+         test_multi_worker_concurrent/1,
+         test_worker_info/1
         ]).
 
 suite() -> [{timetrap, {seconds, 30}}].
@@ -40,7 +44,11 @@ all() ->
      test_sequential,
      test_concurrent_generation,
      test_concurrent_generation_batch,
-     test_concurrent_generation_huge].
+     test_concurrent_generation_huge,
+     test_multi_worker_basic,
+     test_multi_worker_uniqueness,
+     test_multi_worker_concurrent,
+     test_worker_info].
 
 test_init(_Config) ->
     %% Test initialization with custom config
@@ -167,4 +175,100 @@ test_concurrent_generation_huge(_Config) ->
 
     %% All IDs should be unique
     TotalIds = length(lists:usort(AllIds)),
+    ok.
+
+%% ============================================================================
+%% Multi-Worker Tests  
+%% ============================================================================
+
+test_multi_worker_basic(_Config) ->
+    %% Test basic multi-worker functionality
+    Worker1 = snow:start_worker(1640995200000, 1, 2),
+    Worker2 = snow:start_worker(1640995200000, 1, 3),
+    Worker3 = snow:start_worker(1640995200000, 2, 1),
+    
+    %% Generate IDs from different workers
+    Id1 = snow:next_id(Worker1),
+    Id2 = snow:next_id(Worker2),
+    Id3 = snow:next_id(Worker3),
+    
+    %% All IDs should be different
+    true = (Id1 =/= Id2) and (Id2 =/= Id3) and (Id1 =/= Id3),
+    
+    %% Decode and verify worker information
+    #{region := 1, worker := 2} = snow:decode_id(Id1),
+    #{region := 1, worker := 3} = snow:decode_id(Id2),
+    #{region := 2, worker := 1} = snow:decode_id(Id3),
+    
+    %% Test batch generation
+    Ids = snow:next_ids(Worker1, 5),
+    5 = length(Ids),
+    5 = length(lists:usort(Ids)), % All should be unique
+    ok.
+
+test_multi_worker_uniqueness(_Config) ->
+    %% Test uniqueness across multiple workers generating many IDs
+    Workers = [snow:start_worker(1640995200000, R, W) 
+               || R <- lists:seq(0, 3), W <- lists:seq(0, 3)],
+    
+    %% Generate 100 IDs from each worker
+    AllIds = lists:foldl(fun(Worker, Acc) ->
+                                 Ids = snow:next_ids(Worker, 100),
+                                 Ids ++ Acc
+                         end, [], Workers),
+    
+    TotalIds = length(AllIds),
+    UniqueIds = length(lists:usort(AllIds)),
+    TotalIds = UniqueIds, % All IDs should be unique
+    ok.
+
+test_multi_worker_concurrent(_Config) ->
+    %% Test concurrent generation from multiple workers
+    NumWorkers = 10,
+    IdsPerWorker = 1000,
+    
+    %% Create workers with different region/worker combinations
+    Workers = [snow:start_worker(1640995200000, R rem 4, W rem 16) 
+               || {R, W} <- [{I div 16, I rem 16} || I <- lists:seq(0, NumWorkers-1)]],
+    
+    Parent = self(),
+    Pids = [spawn_link(fun() ->
+                               Ids = snow:next_ids(Worker, IdsPerWorker),
+                               Parent ! {self(), Ids}
+                       end) || Worker <- Workers],
+    
+    AllIds = lists:foldl(fun(Pid, Acc) ->
+                                 receive
+                                     {Pid, Ids} -> Ids ++ Acc
+                                 after 10000 ->
+                                         ct:fail("Timeout waiting for process ~p", [Pid])
+                                 end
+                         end, [], Pids),
+    
+    TotalIds = NumWorkers * IdsPerWorker,
+    TotalIds = length(AllIds),
+    
+    %% All IDs should be unique
+    TotalIds = length(lists:usort(AllIds)),
+    ok.
+
+test_worker_info(_Config) ->
+    %% Test worker_info functionality
+    Epoch = 1640995200000,
+    Region = 5,
+    Worker = 10,
+    
+    WorkerHandle = snow:start_worker(Epoch, Region, Worker),
+    Info = snow:worker_info(WorkerHandle),
+    
+    %% Verify info contents
+    Epoch = maps:get(epoch, Info),
+    Region = maps:get(region, Info),
+    Worker = maps:get(worker, Info),
+    
+    Bits = maps:get(bits, Info),
+    41 = maps:get(timestamp, Bits),
+    4 = maps:get(region, Bits),
+    6 = maps:get(worker, Bits),
+    12 = maps:get(sequence, Bits),
     ok.

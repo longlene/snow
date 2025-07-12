@@ -1,57 +1,20 @@
 -module(snow).
 
+%% Include shared definitions
+-include("snow.hrl").
+
 -export([init/3,
          next_id/0,
+         next_id/1,
          next_ids/1,
+         next_ids/2,
          decode_id/1,
-         info/0]).
+         info/0,
+         start_worker/3,
+         worker_info/1]).
 
--define(PERSISTENT_KEY, snow_state).
-
-%% Compile-time configurable bit allocation
-%% These can be overridden in rebar.config or via command line
--ifndef(timestamp_bits).
--define(timestamp_bits, 41).
--endif.
-
--ifndef(region_bits).
--define(region_bits, 4).
--endif.
-
--ifndef(worker_bits).
--define(worker_bits, 6).
--endif.
-
-%% Sequence bits is automatically calculated to ensure total = 64 bits
--define(sequence_bits, (64 - 1 - ?timestamp_bits - ?region_bits - ?worker_bits)).
-
-%% Pre-computed bit shift amounts for fast ID construction
--define(TIMESTAMP_SHIFT, (?region_bits + ?worker_bits + ?sequence_bits)).
--define(REGION_SHIFT, (?worker_bits + ?sequence_bits)).
--define(WORKER_SHIFT, ?sequence_bits).
-
-%% Maximum values for each field
--define(MAX_REGION, ((1 bsl ?region_bits) - 1)).
--define(MAX_WORKER, ((1 bsl ?worker_bits) - 1)).
--define(MAX_SEQUENCE, ((1 bsl ?sequence_bits) - 1)).
-
-%% Compile-time validation: ensure sequence bits is positive
--define(ASSERT_VALID_BITS, 
-    case ?sequence_bits of
-        N when N > 0 -> ok;
-        _ -> error({invalid_bit_allocation, 
-                   "sequence_bits would be " ++ integer_to_list(?sequence_bits) ++ 
-                   ", but must be positive. Reduce other bit allocations."})
-    end).
-
--record(snow_config, {
-    epoch :: non_neg_integer(),
-    region :: non_neg_integer(),
-    worker :: non_neg_integer(),
-    atomic_ref :: atomics:atomics_ref(),
-    %% Pre-computed base ID for fast generation: (Region << region_shift) | (Worker << worker_shift)
-    base_id :: non_neg_integer()
-}).
+%% Type exports - re-export from snow_core
+-type worker_handle() :: snow_core:worker_handle().
 
 %% Initialize with epoch, region, and worker
 -spec init(Epoch :: non_neg_integer(), Region :: non_neg_integer(), Worker :: non_neg_integer()) -> ok.
@@ -88,7 +51,7 @@ next_id() ->
         base_id = BaseId
     } = persistent_term:get(?PERSISTENT_KEY),
     
-    generate_id_loop(Epoch, BaseId, AtomicRef).
+    snow_core:generate_id(Epoch, BaseId, AtomicRef).
 
 %% Generate multiple IDs efficiently by reserving a sequence range
 -spec next_ids(Count :: pos_integer()) -> [non_neg_integer()].
@@ -99,7 +62,7 @@ next_ids(Count) when Count > 0 ->
         base_id = BaseId
     } = persistent_term:get(?PERSISTENT_KEY),
     
-    generate_ids_batch_loop(Count, Epoch, BaseId, AtomicRef).
+    snow_core:generate_ids_batch(Count, Epoch, BaseId, AtomicRef).
 
 %% Decode ID into components using bit operations
 -spec decode_id(Id :: non_neg_integer()) -> #{
@@ -148,130 +111,38 @@ info() ->
         }
     }.
 
-%% Internal functions
-generate_id_loop(Epoch, BaseId, AtomicRef) ->
-    %% Get initial atomic value
-    AtomicValue = atomics:get(AtomicRef, 1),
-    generate_id_loop(Epoch, BaseId, AtomicRef, AtomicValue).
+%% ============================================================================
+%% Multi-Worker API - Delegated to snow_core
+%% ============================================================================
 
-generate_id_loop(Epoch, BaseId, AtomicRef, OldVal) ->
-    %% Parse current state: timestamp in high bits, sequence in low bits
-    OldTimestamp = OldVal bsr ?sequence_bits,
-    OldSequence = OldVal band ?MAX_SEQUENCE,
-    
-    %% Get current timestamp
-    Now = erlang:system_time(millisecond) - Epoch,
-    
-    %% Determine new timestamp and sequence
-    {NewTimestamp, NewSequence} = case Now of
-        Now when Now =:= OldTimestamp ->
-            %% Same millisecond - increment sequence
-            case OldSequence of
-                ?MAX_SEQUENCE ->
-                    %% Sequence exhausted - wait for next millisecond
-                    timer:sleep(1),
-                    NewNow = erlang:system_time(millisecond) - Epoch,
-                    {NewNow, 0};
-                _ ->
-                    %% Normal increment
-                    {Now, OldSequence + 1}
-            end;
-        Now when Now > OldTimestamp ->
-            %% New millisecond - reset sequence to 0
-            {Now, 0};
-        _ ->
-            %% Clock went backwards
-            error({clock_backwards, OldTimestamp, Now})
-    end,
-    
-    %% Create new atomic value
-    NewVal = (NewTimestamp bsl ?sequence_bits) bor NewSequence,
-    
-    %% Compare and swap
-    case atomics:compare_exchange(AtomicRef, 1, OldVal, NewVal) of
-        ok ->
-            %% Success - construct final ID using pre-computed base
-            Id = (NewTimestamp bsl ?TIMESTAMP_SHIFT) bor BaseId bor NewSequence,
-            Id;
-        CurrentVal ->
-            %% CAS failed - use returned current value to retry immediately
-            generate_id_loop(Epoch, BaseId, AtomicRef, CurrentVal)
-    end.
+%% Start a new worker instance
+-spec start_worker(Epoch :: non_neg_integer(), Region :: non_neg_integer(), Worker :: non_neg_integer()) -> worker_handle().
+start_worker(Epoch, Region, Worker) ->
+    snow_core:start(Epoch, Region, Worker).
 
-%% Generate multiple IDs efficiently by reserving a sequence range
-generate_ids_batch_loop(Count, Epoch, BaseId, AtomicRef) ->
-    %% Get initial atomic value
-    AtomicValue = atomics:get(AtomicRef, 1),
-    generate_ids_batch_loop(Count, Epoch, BaseId, AtomicRef, AtomicValue).
+%% Generate single ID using worker handle
+-spec next_id(worker_handle()) -> non_neg_integer().
+next_id(WorkerHandle) ->
+    snow_core:next_id(WorkerHandle).
 
-generate_ids_batch_loop(Count, Epoch, BaseId, AtomicRef, OldVal) ->
-    OldTimestamp = OldVal bsr ?sequence_bits,
-    OldSequence = OldVal band ?MAX_SEQUENCE,
-    
-    %% Get current timestamp
-    Now = erlang:system_time(millisecond) - Epoch,
-    
-    %% Calculate how many IDs we can generate in current millisecond
-    case Now of
-        Now when Now =:= OldTimestamp ->
-            %% Same millisecond - check available sequence space
-            AvailableSeqs = ?MAX_SEQUENCE - OldSequence,
-            case AvailableSeqs of
-                0 ->
-                    %% No space left, wait for next millisecond
-                    timer:sleep(1),
-                    generate_ids_batch_loop(Count, Epoch, BaseId, AtomicRef);
-                _ ->
-                    %% Reserve as many as possible (up to Count)
-                    ReserveCount = erlang:min(Count, AvailableSeqs),
-                    NewSequence = OldSequence + ReserveCount,
-                    NewVal = (OldTimestamp bsl ?sequence_bits) bor NewSequence,
-                    
-                    %% Try to reserve the range
-                    case atomics:compare_exchange(AtomicRef, 1, OldVal, NewVal) of
-                        ok ->
-                            %% Success - generate IDs for reserved range
-                            TimestampBaseId = (OldTimestamp bsl ?TIMESTAMP_SHIFT) bor BaseId,
-                            Ids = [TimestampBaseId bor (OldSequence + I) || I <- lists:seq(1, ReserveCount)],
-                            
-                            %% If we need more IDs, recursively get them
-                            case ReserveCount < Count of
-                                true ->
-                                    Ids ++ generate_ids_batch_loop(Count - ReserveCount, Epoch, BaseId, AtomicRef);
-                                false ->
-                                    Ids
-                            end;
-                        CurrentVal ->
-                            %% CAS failed - use returned current value to retry immediately
-                            generate_ids_batch_loop(Count, Epoch, BaseId, AtomicRef, CurrentVal)
-                    end
-            end;
-        Now when Now > OldTimestamp ->
-            %% New millisecond - can reserve up to Count or MAX_SEQUENCE
-            ReserveCount = erlang:min(Count, ?MAX_SEQUENCE + 1),
-            NewSequence = ReserveCount - 1,
-            NewVal = (Now bsl ?sequence_bits) bor NewSequence,
-            
-            %% Try to reserve the range starting from 0
-            case atomics:compare_exchange(AtomicRef, 1, OldVal, NewVal) of
-                ok ->
-                    %% Success - generate IDs
-                    TimestampBaseId = (Now bsl ?TIMESTAMP_SHIFT) bor BaseId,
-                    Ids = [TimestampBaseId bor I || I <- lists:seq(0, NewSequence)],
-                    
-                    %% If we need more IDs, recursively get them
-                    case ReserveCount < Count of
-                        true ->
-                            Ids ++ generate_ids_batch_loop(Count - ReserveCount, Epoch, BaseId, AtomicRef);
-                        false ->
-                            Ids
-                    end;
-                CurrentVal ->
-                    %% CAS failed - use returned current value to retry immediately
-                    generate_ids_batch_loop(Count, Epoch, BaseId, AtomicRef, CurrentVal)
-            end;
-        _ ->
-            %% Clock went backwards
-            error({clock_backwards, OldTimestamp, Now})
-    end.
+%% Generate multiple IDs using worker handle
+-spec next_ids(worker_handle(), Count :: pos_integer()) -> [non_neg_integer()].
+next_ids(WorkerHandle, Count) when Count > 0 ->
+    snow_core:next_ids(WorkerHandle, Count).
 
+%% Get worker configuration info
+-spec worker_info(worker_handle()) -> #{
+    epoch := non_neg_integer(),
+    region := non_neg_integer(),
+    worker := non_neg_integer(),
+    bits := #{
+        timestamp := pos_integer(),
+        region := pos_integer(),
+        worker := pos_integer(),
+        sequence := pos_integer()
+    }
+}.
+worker_info(WorkerHandle) ->
+    snow_core:worker_info(WorkerHandle).
+
+%% All internal functions have been moved to snow_core.erl
