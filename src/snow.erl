@@ -51,7 +51,7 @@ next_id() ->
         base_id = BaseId
     } = persistent_term:get(?PERSISTENT_KEY),
     
-    snow_core:generate_id(Epoch, BaseId, AtomicRef).
+    snow_core:generate(Epoch, BaseId, AtomicRef).
 
 %% Generate multiple IDs efficiently by reserving a sequence range
 -spec next_ids(Count :: pos_integer()) -> [non_neg_integer()].
@@ -62,7 +62,7 @@ next_ids(Count) when Count > 0 ->
         base_id = BaseId
     } = persistent_term:get(?PERSISTENT_KEY),
     
-    snow_core:generate_ids_batch(Count, Epoch, BaseId, AtomicRef).
+    snow_core:generate_batch(Count, Epoch, BaseId, AtomicRef).
 
 %% Decode ID into components using bit operations
 -spec decode_id(Id :: non_neg_integer()) -> #{

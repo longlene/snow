@@ -9,8 +9,8 @@
          next_ids/2,
          worker_info/1,
          %% Shared functions for global worker
-         generate_id/3,
-         generate_ids_batch/4]).
+         generate/3,
+         generate_batch/4]).
 
 %% Type exports
 -export_type([worker_handle/0]).
@@ -94,13 +94,13 @@ worker_info(#worker_handle{epoch = Epoch, region = Region, worker = Worker}) ->
 %% ============================================================================
 
 %% Shared function for global worker (called from snow.erl)
--spec generate_id(non_neg_integer(), non_neg_integer(), atomics:atomics_ref()) -> non_neg_integer().
-generate_id(Epoch, BaseId, AtomicRef) ->
+-spec generate(non_neg_integer(), non_neg_integer(), atomics:atomics_ref()) -> non_neg_integer().
+generate(Epoch, BaseId, AtomicRef) ->
     generate_id_loop(Epoch, BaseId, AtomicRef).
 
 %% Shared function for global worker batch generation
--spec generate_ids_batch(pos_integer(), non_neg_integer(), non_neg_integer(), atomics:atomics_ref()) -> [non_neg_integer()].
-generate_ids_batch(Count, Epoch, BaseId, AtomicRef) when Count > 0 ->
+-spec generate_batch(pos_integer(), non_neg_integer(), non_neg_integer(), atomics:atomics_ref()) -> [non_neg_integer()].
+generate_batch(Count, Epoch, BaseId, AtomicRef) when Count > 0 ->
     generate_ids_batch_loop(Count, Epoch, BaseId, AtomicRef).
 
 %% ============================================================================
